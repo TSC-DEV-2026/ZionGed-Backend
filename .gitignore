@@ -1,0 +1,108 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Unit test / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+nox/
+coverage.xml
+
+# Type checking / linting
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# =========================
+# FastAPI / Uvicorn
+# =========================
+*.log
+logs/
+log/
+*.pid
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+
+# =========================
+# Database / local files
+# =========================
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+
+# Uploads / generated assets (ajuste se você quer versionar)
+uploads/
+media/
+storage/
+tmp/
+temp/
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =========================
+# IDEs
+# =========================
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.iml
+
+# =========================
+# Windows / tooling
+# =========================
+*.lnk
+
+# =========================
+# Node (se tiver frontend junto)
+# =========================
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,5 +1,3 @@
-# app/routes/auth.py
-
 import os
 import re
 from datetime import datetime
@@ -192,10 +190,16 @@ def get_me(request: Request, db: Session = Depends(get_db)):
             detail="Token inválido",
         )
 
-    # aqui estamos usando o PRÓPRIO token como jti (simples)
-    if db.scalar(
-        select(TokenBlacklist.id).where(TokenBlacklist.jti == access_token)
-    ):
+    # ✅ pega o JTI (UUID) de dentro do JWT
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
+        )
+
+    # ✅ valida blacklist pelo jti (não pelo token inteiro)
+    if db.scalar(select(TokenBlacklist.id).where(TokenBlacklist.jti == jti)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expirado ou inválido",
