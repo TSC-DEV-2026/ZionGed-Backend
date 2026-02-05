@@ -44,3 +44,15 @@ class DocumentoUploadMeta(BaseModel):
 class DocumentoUpdate(BaseModel):
     filename: Optional[str] = None
     tags: Optional[List[TagCreate]] = None
+
+class PaginationMeta(BaseModel):
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+class DocumentoSearchResponse(BaseModel):
+    items: List["DocumentoOut"]
+    meta: PaginationMeta

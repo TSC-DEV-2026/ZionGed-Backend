@@ -12,3 +12,4 @@ email-validator
 python-multipart
 PyJWT
 boto3
+numpy

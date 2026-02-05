@@ -6,17 +6,19 @@ import string
 import os
 from typing import Any
 
+from numpy import ceil
+
 import boto3
 from typing import Any, List, Optional
 from sqlalchemy import func
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 from pydantic import ValidationError
 
 from app.database.connection import get_db
 from app.models.document import Documento, Tag
-from app.schemas.document import DocumentoOut, DocumentoUploadMeta, DocumentoUpdate
+from app.schemas.document import DocumentoOut, DocumentoSearchResponse, DocumentoUploadMeta, DocumentoUpdate, PaginationMeta
 
 router = APIRouter()
 
@@ -105,37 +107,67 @@ async def upload_document(
 
 @router.get(
     "/search",
-    response_model=List[DocumentoOut],
+    response_model=DocumentoSearchResponse,
 )
 def search_documents(
     cliente_id: Optional[int] = None,
     tag_chave: Optional[str] = None,
     tag_valor: Optional[str] = None,
     q: Optional[str] = None,
+
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+
     db: Session = Depends(get_db),
 ) -> Any:
-    query = db.query(Documento).options(joinedload(Documento.tags))
+    base_query = db.query(Documento).options(joinedload(Documento.tags))
 
     if cliente_id is not None:
-        query = query.filter(Documento.cliente_id == cliente_id)
+        base_query = base_query.filter(Documento.cliente_id == cliente_id)
 
     if tag_chave is not None or tag_valor is not None or q is not None:
-        query = query.join(Tag)
+        base_query = base_query.join(Tag)
 
         if tag_chave is not None:
-            query = query.filter(Tag.chave == tag_chave)
+            base_query = base_query.filter(Tag.chave == tag_chave)
 
         if tag_valor is not None:
-            query = query.filter(Tag.valor == tag_valor)
+            base_query = base_query.filter(Tag.valor == tag_valor)
 
         if q is not None:
             like_pattern = f"%{q}%"
-            query = query.filter(Tag.valor.ilike(like_pattern))
+            base_query = base_query.filter(Tag.valor.ilike(like_pattern))
 
-        query = query.distinct()
+        base_query = base_query.distinct()
 
-    documentos = query.order_by(Documento.criado_em.desc()).all()
-    return documentos
+    total_items = (
+        base_query
+        .with_entities(func.count(func.distinct(Documento.id)))
+        .scalar()
+    ) or 0
+
+    total_pages = ceil(total_items / page_size) if total_items > 0 else 0
+
+    offset = (page - 1) * page_size
+
+    documentos = (
+        base_query
+        .order_by(Documento.criado_em.desc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    meta = PaginationMeta(
+        page=page,
+        page_size=page_size,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_next=(page < total_pages) if total_pages else False,
+        has_prev=(page > 1) if total_pages else False,
+    )
+
+    return {"items": documentos, "meta": meta}
 
 @router.get(
     "/{uuid}/download",
