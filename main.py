@@ -11,7 +11,7 @@ app = FastAPI(title="ZionGED API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*", "https://zionged-frontend.onrender.com"],
+    allow_origins=["https://zionged-frontend.onrender.com", "https://ged.ziondocs.com.br"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
