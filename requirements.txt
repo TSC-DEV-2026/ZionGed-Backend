@@ -13,3 +13,4 @@ python-multipart
 PyJWT
 boto3
 numpy
+pypdf

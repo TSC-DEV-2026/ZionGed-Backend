@@ -56,3 +56,51 @@ class PaginationMeta(BaseModel):
 class DocumentoSearchResponse(BaseModel):
     items: List["DocumentoOut"]
     meta: PaginationMeta
+
+class DocumentoConteudoCreateResponse(BaseModel):
+    id: int
+    documento_id: int
+    status_processamento: str
+    criado_em: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DocumentoConteudoResponse(BaseModel):
+    id: int
+    documento_id: int
+    texto_extraido: Optional[str] = None
+    texto_normalizado: Optional[str] = None
+    total_paginas: Optional[int] = None
+    ocr_aplicado: bool
+    status_processamento: str
+    erro_processamento: Optional[str] = None
+    processado_em: Optional[datetime] = None
+    criado_em: datetime
+    atualizado_em: datetime
+
+    class Config:
+        from_attributes = True
+
+class DocumentoSearchInteligentItem(BaseModel):
+    id: int
+    uuid: str
+    cliente_id: int
+    filename: str
+    content_type: str
+    tamanho_bytes: int
+    criado_em: datetime
+    score: float
+    trecho: Optional[str] = None
+    tags: List[TagOut] = []
+
+    model_config = {"from_attributes": True}
+
+
+class DocumentoSearchInteligentResponse(BaseModel):
+    q: str
+    total: int
+    page: int
+    page_size: int
+    items: List[DocumentoSearchInteligentItem]

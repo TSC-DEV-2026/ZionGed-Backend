@@ -5,20 +5,36 @@ import secrets
 import string
 import os
 from typing import Any
+import re
+from pathlib import Path
+from typing import Tuple
+from pypdf import PdfReader
+from io import BytesIO
 
-from numpy import ceil
+from math import ceil
 
 import boto3
 from typing import Any, List, Optional
-from sqlalchemy import func
+from sqlalchemy import func, text, or_
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 from pydantic import ValidationError
 
 from app.database.connection import get_db
-from app.models.document import Documento, Tag
-from app.schemas.document import DocumentoOut, DocumentoSearchResponse, DocumentoUploadMeta, DocumentoUpdate, PaginationMeta
+from app.models.document import Documento, Tag, DocumentoConteudo
+from app.schemas.document import (
+    DocumentoOut,
+    DocumentoSearchResponse,
+    DocumentoUploadMeta,
+    DocumentoUpdate,
+    PaginationMeta,
+    DocumentoConteudoCreateResponse,
+    DocumentoConteudoResponse,
+    DocumentoSearchInteligentResponse,
+    DocumentoSearchInteligentItem,
+    TagOut,
+)
 
 router = APIRouter()
 
@@ -28,11 +44,77 @@ if not S3_BUCKET_NAME:
 
 s3_client = boto3.client("s3")
 
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.replace("\x00", " ")
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> Tuple[str, int]:
+    reader = PdfReader(BytesIO(pdf_bytes))
+    total_paginas = len(reader.pages)
+
+    textos = []
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        textos.append(page_text)
+
+    texto_extraido = "\n\n".join(textos).strip()
+    return texto_extraido, total_paginas
+
+def looks_like_empty_extraction(text: str, total_paginas: int) -> bool:
+    if not text or not text.strip():
+        return True
+
+    texto_limpo = text.strip()
+    if len(texto_limpo) < 20 and total_paginas >= 1:
+        return True
+
+    letras = sum(ch.isalpha() for ch in texto_limpo)
+    if total_paginas > 0 and letras < (5 * total_paginas):
+        return True
+
+    return False
 
 def generate_uuid12() -> str:
     alphabet = string.ascii_lowercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(12))
 
+def build_snippet(text: Optional[str], query: str, max_len: int = 220) -> Optional[str]:
+    if not text:
+        return None
+
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+
+    q = query.strip()
+    if not q:
+        return text[:max_len]
+
+    pos = text.lower().find(q.lower())
+    if pos == -1:
+        return text[:max_len]
+
+    start = max(0, pos - 80)
+    end = min(len(text), pos + len(q) + 120)
+
+    trecho = text[start:end].strip()
+
+    if start > 0:
+        trecho = "..." + trecho
+    if end < len(text):
+        trecho = trecho + "..."
+
+    return trecho
+
+def generate_uuid12() -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(12))
 
 @router.post(
     "/upload",
@@ -114,19 +196,25 @@ def search_documents(
     tag_chave: Optional[str] = None,
     tag_valor: Optional[str] = None,
     q: Optional[str] = None,
-
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
-
     db: Session = Depends(get_db),
 ) -> Any:
-    base_query = db.query(Documento).options(joinedload(Documento.tags))
+    base_query = (
+        db.query(Documento)
+        .options(joinedload(Documento.tags))
+    )
 
     if cliente_id is not None:
         base_query = base_query.filter(Documento.cliente_id == cliente_id)
 
+    # Só entra em joins se realmente precisar filtrar por tags/conteúdo
     if tag_chave is not None or tag_valor is not None or q is not None:
-        base_query = base_query.join(Tag)
+        base_query = (
+            base_query
+            .outerjoin(Tag, Tag.documento_id == Documento.id)
+            .outerjoin(DocumentoConteudo, DocumentoConteudo.documento_id == Documento.id)
+        )
 
         if tag_chave is not None:
             base_query = base_query.filter(Tag.chave == tag_chave)
@@ -136,7 +224,15 @@ def search_documents(
 
         if q is not None:
             like_pattern = f"%{q}%"
-            base_query = base_query.filter(Tag.valor.ilike(like_pattern))
+            base_query = base_query.filter(
+                or_(
+                    Tag.chave.ilike(like_pattern),
+                    Tag.valor.ilike(like_pattern),
+                    Documento.filename.ilike(like_pattern),
+                    DocumentoConteudo.texto_extraido.ilike(like_pattern),
+                    DocumentoConteudo.texto_normalizado.ilike(like_pattern),
+                )
+            )
 
         base_query = base_query.distinct()
 
@@ -147,7 +243,6 @@ def search_documents(
     ) or 0
 
     total_pages = ceil(total_items / page_size) if total_items > 0 else 0
-
     offset = (page - 1) * page_size
 
     documentos = (
@@ -167,7 +262,10 @@ def search_documents(
         has_prev=(page > 1) if total_pages else False,
     )
 
-    return {"items": documentos, "meta": meta}
+    return {
+        "items": documentos,
+        "meta": meta,
+    }
 
 @router.get(
     "/{uuid}/download",
@@ -304,3 +402,135 @@ def delete_document(
     db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@router.post("/{document_id}/content/register", response_model=DocumentoConteudoCreateResponse)
+def register_document_content(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    documento = db.query(Documento).filter(Documento.id == document_id).first()
+    if not documento:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+
+    existente = (
+        db.query(DocumentoConteudo)
+        .filter(DocumentoConteudo.documento_id == document_id)
+        .first()
+    )
+    if existente:
+        raise HTTPException(status_code=409, detail="Conteúdo do documento já registrado")
+
+    conteudo = DocumentoConteudo(
+        documento_id=document_id,
+        status_processamento="pendente",
+        ocr_aplicado=False,
+    )
+
+    db.add(conteudo)
+    db.commit()
+    db.refresh(conteudo)
+
+    return conteudo
+
+@router.get("/{document_id}/content", response_model=DocumentoConteudoResponse)
+def get_document_content(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    conteudo = (
+        db.query(DocumentoConteudo)
+        .filter(DocumentoConteudo.documento_id == document_id)
+        .first()
+    )
+
+    if not conteudo:
+        raise HTTPException(status_code=404, detail="Conteúdo do documento não encontrado")
+
+    return conteudo
+
+@router.post("/{document_id}/content/process", response_model=DocumentoConteudoResponse)
+def process_document_content(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    documento = db.query(Documento).filter(Documento.id == document_id).first()
+    if not documento:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+
+    if not documento.bucket_key:
+        raise HTTPException(status_code=400, detail="Documento sem bucket_key definido")
+
+    if documento.content_type.lower() != "application/pdf":
+        raise HTTPException(status_code=400, detail="Apenas arquivos PDF podem ser processados nesta rota")
+
+    conteudo = (
+        db.query(DocumentoConteudo)
+        .filter(DocumentoConteudo.documento_id == document_id)
+        .first()
+    )
+
+    if not conteudo:
+        conteudo = DocumentoConteudo(
+            documento_id=document_id,
+            status_processamento="pendente",
+            ocr_aplicado=False,
+        )
+        db.add(conteudo)
+        db.commit()
+        db.refresh(conteudo)
+
+    try:
+        conteudo.status_processamento = "processando"
+        conteudo.erro_processamento = None
+        db.commit()
+
+        try:
+            obj = s3_client.get_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=documento.bucket_key,
+            )
+            pdf_bytes = obj["Body"].read()
+        except Exception as e:
+            conteudo.status_processamento = "erro"
+            conteudo.erro_processamento = f"Falha ao buscar arquivo no bucket: {str(e)}"
+            conteudo.processado_em = datetime.utcnow()
+            db.commit()
+            db.refresh(conteudo)
+            raise HTTPException(status_code=404, detail=f"Arquivo não encontrado no bucket: {documento.bucket_key}")
+
+        texto_extraido, total_paginas = extract_text_from_pdf_bytes(pdf_bytes)
+
+        if looks_like_empty_extraction(texto_extraido, total_paginas):
+            conteudo.status_processamento = "erro"
+            conteudo.erro_processamento = "Não foi possível extrair texto útil do PDF. Provável PDF escaneado ou sem camada de texto."
+            conteudo.texto_extraido = None
+            conteudo.texto_normalizado = None
+            conteudo.total_paginas = total_paginas
+            conteudo.ocr_aplicado = False
+            conteudo.processado_em = datetime.utcnow()
+            db.commit()
+            db.refresh(conteudo)
+            return conteudo
+
+        conteudo.texto_extraido = texto_extraido
+        conteudo.texto_normalizado = normalize_text(texto_extraido)
+        conteudo.total_paginas = total_paginas
+        conteudo.ocr_aplicado = False
+        conteudo.status_processamento = "pronto"
+        conteudo.erro_processamento = None
+        conteudo.processado_em = datetime.utcnow()
+
+        db.commit()
+        db.refresh(conteudo)
+        return conteudo
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        conteudo.status_processamento = "erro"
+        conteudo.erro_processamento = str(e)
+        conteudo.processado_em = datetime.utcnow()
+        db.commit()
+        db.refresh(conteudo)
+        raise HTTPException(status_code=500, detail=f"Erro ao processar documento: {str(e)}")

@@ -7,6 +7,9 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    Integer,
+    Boolean,
+    func,
 )
 from sqlalchemy.orm import relationship
 
@@ -33,6 +36,13 @@ class Documento(Base):
         lazy="joined",
     )
 
+    conteudo = relationship(
+        "DocumentoConteudo",
+        back_populates="documento",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
 
 class Tag(Base):
     __tablename__ = "tb_tags"
@@ -48,3 +58,28 @@ class Tag(Base):
     valor = Column(Text, nullable=False, index=True)
 
     documento = relationship("Documento", back_populates="tags")
+
+
+class DocumentoConteudo(Base):
+    __tablename__ = "tb_documento_conteudo"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    documento_id = Column(
+        BigInteger,
+        ForeignKey("tb_documento.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    texto_extraido = Column(Text, nullable=True)
+    texto_normalizado = Column(Text, nullable=True)
+    total_paginas = Column(Integer, nullable=True)
+    ocr_aplicado = Column(Boolean, nullable=False, default=False)
+    status_processamento = Column(String(30), nullable=False, default="pendente")
+    erro_processamento = Column(Text, nullable=True)
+    processado_em = Column(DateTime, nullable=True)
+    criado_em = Column(DateTime, server_default=func.now(), nullable=False)
+    atualizado_em = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    documento = relationship("Documento", back_populates="conteudo")

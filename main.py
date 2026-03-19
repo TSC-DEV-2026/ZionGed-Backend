@@ -4,6 +4,8 @@ from app.database.connection import engine, Base
 from app.models.auth import Pessoa, Usuario
 from app.models.document import Documento, Tag
 from app.routes import api_router
+from app.routes.regras import router as regras_router
+from app.routes.documents_desktop import router as documents_desktop_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -18,6 +20,8 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+app.include_router(regras_router)
+app.include_router(documents_desktop_router)
 
 @app.get("/health")
 def health():
