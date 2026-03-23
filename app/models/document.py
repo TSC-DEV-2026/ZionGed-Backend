@@ -2,13 +2,13 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
-    Integer,
-    Boolean,
     func,
 )
 from sqlalchemy.orm import relationship
@@ -76,7 +76,7 @@ class DocumentoConteudo(Base):
     texto_normalizado = Column(Text, nullable=True)
     total_paginas = Column(Integer, nullable=True)
     ocr_aplicado = Column(Boolean, nullable=False, default=False)
-    status_processamento = Column(String(30), nullable=False, default="pendente")
+    status_processamento = Column(Boolean, nullable=False)
     erro_processamento = Column(Text, nullable=True)
     processado_em = Column(DateTime, nullable=True)
     criado_em = Column(DateTime, server_default=func.now(), nullable=False)

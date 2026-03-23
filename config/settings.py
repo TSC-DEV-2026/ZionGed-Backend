@@ -13,11 +13,15 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_MINUTES: int
     ENVIRONMENT: str
 
-    S3_BUCKET_NAME: str
-    AWS_ACCESS_KEY_ID: str
-    AWS_SECRET_ACCESS_KEY: str
-    AWS_DEFAULT_REGION: str
+    STORAGE_PROVIDER: str
 
+    R2_BUCKET_NAME: str
+    R2_ACCOUNT_ID: str
+    R2_ACCESS_KEY_ID: str
+    R2_SECRET_ACCESS_KEY: str
+
+    R2_ENDPOINT: str
+    R2_REGION: str
 
     class Config:
         env_file = ".env"

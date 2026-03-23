@@ -29,6 +29,10 @@ def extrair_texto_arquivo(caminho_arquivo: str) -> str:
     return ""
 
 
+def extract_text_from_file(caminho_arquivo: str) -> str:
+    return extrair_texto_arquivo(caminho_arquivo)
+
+
 def extrair_cpf(texto: str) -> Optional[str]:
     m = re.search(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b", texto or "")
     return m.group(0) if m else None

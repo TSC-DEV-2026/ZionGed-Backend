@@ -3,19 +3,13 @@ from pathlib import Path
 import hashlib
 import secrets
 import string
-import os
-from typing import Any
 import re
-from pathlib import Path
-from typing import Tuple
-from pypdf import PdfReader
+from typing import Any, Optional, Tuple
 from io import BytesIO
-
 from math import ceil
 
-import boto3
-from typing import Any, List, Optional
-from sqlalchemy import func, text, or_
+from pypdf import PdfReader
+from sqlalchemy import func, or_
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
@@ -31,18 +25,12 @@ from app.schemas.document import (
     PaginationMeta,
     DocumentoConteudoCreateResponse,
     DocumentoConteudoResponse,
-    DocumentoSearchInteligentResponse,
-    DocumentoSearchInteligentItem,
-    TagOut,
 )
+from app.services.storage import StorageService
 
 router = APIRouter()
+storage = StorageService()
 
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "")
-if not S3_BUCKET_NAME:
-    raise RuntimeError("S3_BUCKET_NAME não configurado no .env")
-
-s3_client = boto3.client("s3")
 
 def normalize_text(text: str) -> str:
     if not text:
@@ -53,6 +41,7 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> Tuple[str, int]:
     reader = PdfReader(BytesIO(pdf_bytes))
@@ -65,6 +54,7 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> Tuple[str, int]:
 
     texto_extraido = "\n\n".join(textos).strip()
     return texto_extraido, total_paginas
+
 
 def looks_like_empty_extraction(text: str, total_paginas: int) -> bool:
     if not text or not text.strip():
@@ -80,9 +70,11 @@ def looks_like_empty_extraction(text: str, total_paginas: int) -> bool:
 
     return False
 
+
 def generate_uuid12() -> str:
     alphabet = string.ascii_lowercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(12))
+
 
 def build_snippet(text: Optional[str], query: str, max_len: int = 220) -> Optional[str]:
     if not text:
@@ -112,9 +104,6 @@ def build_snippet(text: Optional[str], query: str, max_len: int = 220) -> Option
 
     return trecho
 
-def generate_uuid12() -> str:
-    alphabet = string.ascii_lowercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(12))
 
 @router.post(
     "/upload",
@@ -145,22 +134,18 @@ async def upload_document(
 
     content = await file.read()
     tamanho_bytes = len(content)
-
-    import base64
-
-    file_base64 = base64.b64encode(content).decode("utf-8")
     hash_sha256 = hashlib.sha256(content).hexdigest() if tamanho_bytes > 0 else None
+
     try:
-        s3_client.put_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=bucket_key,
-            Body=content,
-            ContentType=file.content_type or "application/octet-stream",
+        storage.upload_bytes(
+            content=content,
+            key=bucket_key,
+            content_type=file.content_type or "application/octet-stream",
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Falha ao enviar arquivo para o bucket: {e}",
+            detail=f"Falha ao enviar arquivo para o storage: {e}",
         )
 
     documento = Documento(
@@ -187,6 +172,7 @@ async def upload_document(
 
     return documento
 
+
 @router.get(
     "/search",
     response_model=DocumentoSearchResponse,
@@ -208,7 +194,6 @@ def search_documents(
     if cliente_id is not None:
         base_query = base_query.filter(Documento.cliente_id == cliente_id)
 
-    # Só entra em joins se realmente precisar filtrar por tags/conteúdo
     if tag_chave is not None or tag_valor is not None or q is not None:
         base_query = (
             base_query
@@ -267,6 +252,7 @@ def search_documents(
         "meta": meta,
     }
 
+
 @router.get(
     "/{uuid}/download",
 )
@@ -285,17 +271,12 @@ def download_document(
         raise HTTPException(status_code=404, detail="Documento não encontrado.")
 
     try:
-        obj = s3_client.get_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=documento.bucket_key,
-        )
+        body = storage.download_stream(documento.bucket_key)
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Falha ao buscar arquivo no bucket: {e}",
+            detail=f"Falha ao buscar arquivo no storage: {e}",
         )
-
-    body = obj["Body"]
 
     def iterfile():
         for chunk in body.iter_chunks(chunk_size=8192):
@@ -310,18 +291,12 @@ def download_document(
         },
     )
 
+
 @router.get("/tags")
 def listar_tags_disponiveis(
     cliente_id: int | None = None,
     db: Session = Depends(get_db),
 ):
-    """
-    Retorna a lista de chaves de tags disponíveis no banco,
-    opcionalmente filtradas por cliente_id.
-    Exemplo de retorno:
-    { "tags": ["tipo", "cpf", "competencia"] }
-    """
-
     query = db.query(Tag.chave).distinct()
 
     if cliente_id is not None:
@@ -336,6 +311,7 @@ def listar_tags_disponiveis(
     tags = [row[0] for row in rows]
 
     return {"tags": tags}
+
 
 @router.put(
     "/{uuid}/update",
@@ -370,6 +346,7 @@ def update_document(
 
     return documento
 
+
 @router.delete(
     "/{uuid}/delete",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -388,20 +365,18 @@ def delete_document(
         raise HTTPException(status_code=404, detail="Documento não encontrado.")
 
     try:
-        s3_client.delete_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=documento.bucket_key,
-        )
+        storage.delete_object(documento.bucket_key)
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Falha ao apagar arquivo no bucket: {e}",
+            detail=f"Falha ao apagar arquivo no storage: {e}",
         )
 
     db.delete(documento)
     db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 @router.post("/{document_id}/content/register", response_model=DocumentoConteudoCreateResponse)
 def register_document_content(
@@ -432,6 +407,7 @@ def register_document_content(
 
     return conteudo
 
+
 @router.get("/{document_id}/content", response_model=DocumentoConteudoResponse)
 def get_document_content(
     document_id: int,
@@ -447,6 +423,7 @@ def get_document_content(
         raise HTTPException(status_code=404, detail="Conteúdo do documento não encontrado")
 
     return conteudo
+
 
 @router.post("/{document_id}/content/process", response_model=DocumentoConteudoResponse)
 def process_document_content(
@@ -485,18 +462,14 @@ def process_document_content(
         db.commit()
 
         try:
-            obj = s3_client.get_object(
-                Bucket=S3_BUCKET_NAME,
-                Key=documento.bucket_key,
-            )
-            pdf_bytes = obj["Body"].read()
+            pdf_bytes = storage.download_bytes(documento.bucket_key)
         except Exception as e:
             conteudo.status_processamento = "erro"
-            conteudo.erro_processamento = f"Falha ao buscar arquivo no bucket: {str(e)}"
+            conteudo.erro_processamento = f"Falha ao buscar arquivo no storage: {str(e)}"
             conteudo.processado_em = datetime.utcnow()
             db.commit()
             db.refresh(conteudo)
-            raise HTTPException(status_code=404, detail=f"Arquivo não encontrado no bucket: {documento.bucket_key}")
+            raise HTTPException(status_code=404, detail=f"Arquivo não encontrado no storage: {documento.bucket_key}")
 
         texto_extraido, total_paginas = extract_text_from_pdf_bytes(pdf_bytes)
 
