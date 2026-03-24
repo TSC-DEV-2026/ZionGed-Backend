@@ -1,20 +1,173 @@
 import hashlib
+import os
+import posixpath
+import tempfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session, joinedload
+from fastapi.responses import FileResponse
+from sqlalchemy import and_
+from sqlalchemy.orm import Session, aliased, joinedload
+from starlette.background import BackgroundTask
 
 from app.database.connection import get_db
-from app.models.document import Documento, Tag, DocumentoConteudo
+from app.models.document import Documento, DocumentoConteudo, Tag
 from app.models.regra_documento import RegraDocumento
-from app.schemas.documents_desktop import UploadDesktopMeta
-from app.services.document_processor import extrair_texto_arquivo
+from app.schemas.documents_desktop import (
+    DocumentoDesktopDownloadMassaIn,
+    DocumentoDesktopSearchIn,
+    DocumentoDesktopSearchOutItem,
+    UploadDesktopMeta,
+)
+from app.services.document_processor import extrair_texto_pdf_bytes
 from app.services.storage import StorageService
 
 router = APIRouter(prefix="/documents-desktop", tags=["Documents Desktop"])
 storage = StorageService()
+
+REGRA_TAG_KEY = "__regra_id__"
+
+
+def normalizar_filepath(valor: str | None) -> str | None:
+    if not valor:
+        return None
+
+    valor = valor.replace("\\", "/").strip().strip("/")
+
+    partes_limpas = []
+    for parte in valor.split("/"):
+        parte = parte.strip()
+        if not parte or parte in (".", ".."):
+            continue
+        partes_limpas.append(parte)
+
+    if not partes_limpas:
+        return None
+
+    return "/".join(partes_limpas)
+
+
+def normalizar_parte_pasta(valor: str | None) -> str:
+    if not valor:
+        return ""
+    valor = str(valor).replace("\\", "/").strip().strip("/")
+    partes = []
+    for parte in valor.split("/"):
+        parte = parte.strip()
+        if not parte or parte in (".", ".."):
+            continue
+        partes.append(parte)
+    return "_".join(partes).strip()
+
+
+def get_regra_id_from_tags(documento: Documento) -> int | None:
+    for tag in documento.tags:
+        if tag.chave == REGRA_TAG_KEY:
+            try:
+                return int(tag.valor)
+            except Exception:
+                return None
+    return None
+
+
+def get_tags_map(documento: Documento) -> dict:
+    retorno = {}
+    for tag in documento.tags:
+        if tag.chave == REGRA_TAG_KEY:
+            continue
+        retorno[tag.chave] = tag.valor
+    return retorno
+
+
+def montar_arcname_filepath(documento: Documento, usados: set[str]) -> str:
+    nome_arquivo = Path(documento.filename).name
+    filepath = normalizar_filepath(documento.filepath)
+
+    if filepath:
+        arcname = posixpath.join(filepath, nome_arquivo)
+    else:
+        arcname = nome_arquivo
+
+    if arcname not in usados:
+        usados.add(arcname)
+        return arcname
+
+    stem = Path(nome_arquivo).stem
+    suffix = Path(nome_arquivo).suffix
+    contador = 1
+
+    while True:
+        novo_nome = f"{stem}_{contador}{suffix}"
+        candidato = posixpath.join(filepath, novo_nome) if filepath else novo_nome
+        if candidato not in usados:
+            usados.add(candidato)
+            return candidato
+        contador += 1
+
+
+def montar_arcname_tags(documento: Documento, ordem_tags: list[str], usados: set[str]) -> str:
+    nome_arquivo = Path(documento.filename).name
+    tags_map = get_tags_map(documento)
+
+    partes_pasta = []
+    for chave in ordem_tags:
+        valor = tags_map.get(chave)
+        valor_norm = normalizar_parte_pasta(valor)
+        if valor_norm:
+            partes_pasta.append(valor_norm)
+
+    if partes_pasta:
+        arcname = posixpath.join(*partes_pasta, nome_arquivo)
+    else:
+        arcname = nome_arquivo
+
+    if arcname not in usados:
+        usados.add(arcname)
+        return arcname
+
+    stem = Path(nome_arquivo).stem
+    suffix = Path(nome_arquivo).suffix
+    contador = 1
+
+    while True:
+        novo_nome = f"{stem}_{contador}{suffix}"
+        candidato = posixpath.join(*partes_pasta, novo_nome) if partes_pasta else novo_nome
+        if candidato not in usados:
+            usados.add(candidato)
+            return candidato
+        contador += 1
+
+
+def aplicar_filtros_documentos(query, payload):
+    if getattr(payload, "uuids", None):
+        if payload.uuids:
+            query = query.filter(Documento.uuid.in_(payload.uuids))
+
+    if getattr(payload, "filename", None):
+        if payload.filename and payload.filename.strip():
+            query = query.filter(Documento.filename.ilike(f"%{payload.filename.strip()}%"))
+
+    if getattr(payload, "somente_com_filepath", False):
+        query = query.filter(Documento.filepath.isnot(None)).filter(Documento.filepath != "")
+
+    if getattr(payload, "regra_id", None) is not None:
+        regra_tag = aliased(Tag)
+        query = (
+            query.join(
+                regra_tag,
+                and_(
+                    regra_tag.documento_id == Documento.id,
+                    regra_tag.chave == REGRA_TAG_KEY,
+                ),
+            )
+            .filter(regra_tag.valor == str(payload.regra_id))
+            .distinct()
+        )
+
+    return query
 
 
 @router.post("/upload")
@@ -38,7 +191,10 @@ async def upload_document_desktop(
     if not regra:
         raise HTTPException(status_code=404, detail="Regra não encontrada.")
 
-    nome_original = file.filename or "arquivo_sem_nome"
+    nome_original = (file.filename or "arquivo_sem_nome").strip()
+    if not nome_original:
+        nome_original = "arquivo_sem_nome"
+
     content_type = file.content_type or "application/octet-stream"
 
     nome_sem_extensao = Path(nome_original).stem
@@ -68,7 +224,9 @@ async def upload_document_desktop(
     elif modo == "hibrido":
         tags_finais = {**tags_arquivo, **tags_manuais}
     else:
-        raise HTTPException(status_code=400, detail="modo_tags inválido.")
+        raise HTTPException(status_code=400, detail="modo_tags inválido. Use manual, arquivo ou hibrido.")
+
+    filepath = normalizar_filepath(meta_data.pasta_relativa)
 
     try:
         content = await file.read()
@@ -90,7 +248,8 @@ async def upload_document_desktop(
             uuid=uuid12,
             cliente_id=meta_data.cliente_id,
             bucket_key=bucket_key,
-            filename=nome_original,
+            filename=Path(nome_original).name,
+            filepath=filepath,
             content_type=content_type,
             tamanho_bytes=tamanho_bytes,
             hash_sha256=hash_sha256,
@@ -98,6 +257,14 @@ async def upload_document_desktop(
 
         db.add(documento)
         db.flush()
+
+        db.add(
+            Tag(
+                documento_id=documento.id,
+                chave=REGRA_TAG_KEY,
+                valor=str(meta_data.regra_id),
+            )
+        )
 
         for chave, valor in tags_finais.items():
             db.add(
@@ -110,15 +277,16 @@ async def upload_document_desktop(
 
         texto_extraido = ""
         texto_normalizado = ""
+        total_paginas = None
         status_processamento = False
         erro_processamento = None
 
         try:
-            sufixo = Path(nome_original).suffix.lower()
-            if sufixo == ".pdf":
-                texto_extraido = extrair_texto_arquivo(content) or ""
+            if Path(nome_original).suffix.lower() == ".pdf":
+                texto_extraido, total_paginas = extrair_texto_pdf_bytes(content)
             else:
                 texto_extraido = ""
+                total_paginas = None
 
             texto_normalizado = " ".join(texto_extraido.split()) if texto_extraido else ""
             status_processamento = True
@@ -131,7 +299,7 @@ async def upload_document_desktop(
                 documento_id=documento.id,
                 texto_extraido=texto_extraido,
                 texto_normalizado=texto_normalizado,
-                total_paginas=None,
+                total_paginas=total_paginas,
                 ocr_aplicado=False,
                 status_processamento=status_processamento,
                 erro_processamento=erro_processamento,
@@ -147,12 +315,131 @@ async def upload_document_desktop(
             "documento_id": documento.id,
             "uuid": documento.uuid,
             "filename": documento.filename,
-            "tags_criadas": [
-                {"chave": chave, "valor": valor}
-                for chave, valor in tags_finais.items()
-            ],
+            "filepath": documento.filepath,
+            "bucket_key": documento.bucket_key,
+            "tags_criadas": [{"chave": k, "valor": v} for k, v in tags_finais.items()],
         }
 
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao processar upload: {e}")
+
+
+@router.post("/search", response_model=list[DocumentoDesktopSearchOutItem])
+def search_documents_desktop(
+    payload: DocumentoDesktopSearchIn,
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(Documento)
+        .options(joinedload(Documento.tags))
+        .filter(Documento.cliente_id == payload.cliente_id)
+    )
+
+    query = aplicar_filtros_documentos(query, payload)
+
+    limit = payload.limit if payload.limit > 0 else 200
+    if limit > 1000:
+        limit = 1000
+
+    documentos = query.order_by(Documento.criado_em.desc()).limit(limit).all()
+
+    retorno = []
+    for doc in documentos:
+        retorno.append(
+            DocumentoDesktopSearchOutItem(
+                id=doc.id,
+                uuid=doc.uuid,
+                cliente_id=doc.cliente_id,
+                filename=doc.filename,
+                filepath=doc.filepath,
+                bucket_key=doc.bucket_key,
+                content_type=doc.content_type,
+                tamanho_bytes=doc.tamanho_bytes,
+                criado_em=doc.criado_em.isoformat() if doc.criado_em else None,
+                regra_id=get_regra_id_from_tags(doc),
+            )
+        )
+
+    return retorno
+
+
+@router.post("/download-massa")
+def download_massa_desktop(
+    payload: DocumentoDesktopDownloadMassaIn,
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(Documento)
+        .options(joinedload(Documento.tags))
+        .filter(Documento.cliente_id == payload.cliente_id)
+    )
+
+    query = aplicar_filtros_documentos(query, payload)
+
+    filtros_informados = any(
+        [
+            payload.uuids,
+            payload.filename,
+            payload.regra_id is not None,
+            payload.somente_com_filepath,
+        ]
+    )
+
+    if not payload.baixar_todos and not filtros_informados:
+        raise HTTPException(
+            status_code=400,
+            detail="Informe algum filtro, selecione documentos, ou marque baixar_todos=true.",
+        )
+
+    modo_estrutura = (payload.modo_estrutura or "filepath").strip().lower()
+    if modo_estrutura not in ("filepath", "tags"):
+        raise HTTPException(status_code=400, detail="modo_estrutura inválido. Use filepath ou tags.")
+
+    if modo_estrutura == "tags" and not payload.ordem_tags:
+        raise HTTPException(status_code=400, detail="Informe ordem_tags quando modo_estrutura='tags'.")
+
+    documentos = query.order_by(Documento.criado_em.asc()).all()
+
+    if not documentos:
+        raise HTTPException(status_code=404, detail="Nenhum documento encontrado para download.")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    tmp.close()
+    zip_path = tmp.name
+
+    try:
+        usados = set()
+
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for documento in documentos:
+                try:
+                    content = storage.download_bytes(documento.bucket_key)
+                except Exception as e:
+                    nome_erro = f"_erros/{documento.id}.txt"
+                    zf.writestr(
+                        nome_erro,
+                        f"Falha ao baixar documento {documento.id} - {documento.filename}\n{e}",
+                    )
+                    continue
+
+                if modo_estrutura == "tags":
+                    arcname = montar_arcname_tags(documento, payload.ordem_tags, usados)
+                else:
+                    arcname = montar_arcname_filepath(documento, usados)
+
+                zf.writestr(arcname, content)
+
+        nome_zip = f"cliente_{payload.cliente_id}_download_massa.zip"
+
+        return FileResponse(
+            path=zip_path,
+            media_type="application/zip",
+            filename=nome_zip,
+            background=BackgroundTask(lambda: os.path.exists(zip_path) and os.remove(zip_path)),
+        )
+
+    except Exception:
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        raise

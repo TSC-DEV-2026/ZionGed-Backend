@@ -1,11 +1,27 @@
 import os
 import re
 import shutil
-from typing import Dict, List, Optional
+from io import BytesIO
+from typing import Dict, List, Optional, Tuple
 
 
 def normalize_spaces(texto: str) -> str:
     return re.sub(r"[ \t]+", " ", texto or "").strip()
+
+
+def extrair_texto_pdf_bytes(content: bytes) -> Tuple[str, int]:
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(content))
+        partes = []
+
+        for page in reader.pages:
+            partes.append(page.extract_text() or "")
+
+        return "\n".join(partes).strip(), len(reader.pages)
+    except Exception:
+        return "", 0
 
 
 def extrair_texto_arquivo(caminho_arquivo: str) -> str:
