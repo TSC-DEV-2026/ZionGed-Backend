@@ -1,35 +1,24 @@
+from __future__ import annotations
+
 import os
 import re
-from datetime import datetime
-from typing import Optional
+import secrets
+import string
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from pydantic import BaseModel
-
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    Request,
-    Response,
-    status,
-)
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database.connection import get_db
 from app.models import Pessoa, Usuario, TokenBlacklist
-from app.schemas.auth import RegisterIn, RegisterOut
-from app.security.password import (
-    hash_password,
-    verify_password,
-)
+from app.schemas.auth import RegisterIn, RegisterOut, LoginInput, LoginExecutavelInput
+from app.security.password import hash_password, verify_password
 from app.utils.jwt_handler import criar_token, verificar_token, decode_token
 
 router = APIRouter()
-
-# --- Config de cookies no estilo do outro projeto ---
 
 load_dotenv()
 is_prod = os.getenv("ENVIRONMENT") == "prod"
@@ -42,107 +31,55 @@ cookie_env = {
     "domain": cookie_domain,
 }
 
-# --- Registro (igual você já tinha) ---
+
+def normalizar_cpf(cpf: str | None) -> str | None:
+    if not cpf:
+        return None
+    digits = re.sub(r"\D", "", cpf)
+    return digits or None
 
 
-@router.post(
-    "/register",
-    response_model=RegisterOut,
-    status_code=status.HTTP_201_CREATED,
-)
-def register(payload: RegisterIn, db: Session = Depends(get_db)):
-    # validações básicas
-    if db.scalar(select(Usuario.id).where(Usuario.email == payload.usuario.email)):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="E-mail já cadastrado",
-        )
-    if payload.pessoa.cpf and db.scalar(
-        select(Pessoa.id).where(Pessoa.cpf == payload.pessoa.cpf)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="CPF já cadastrado",
-        )
+def gerar_login_token(db: Session) -> str:
+    chars = string.ascii_letters + string.digits
 
-    # cria Pessoa
-    pessoa = Pessoa(
-        nome=payload.pessoa.nome,
-        cpf=payload.pessoa.cpf,
-        data_nascimento=payload.pessoa.data_nascimento,
-        telefone=payload.pessoa.telefone,
-    )
-    db.add(pessoa)
-    db.flush()
-
-    # cria Usuário vinculado à pessoa (senha hash)
-    usuario = Usuario(
-        pessoa_id=pessoa.id,
-        email=payload.usuario.email,
-        senha_hash=hash_password(payload.usuario.senha),
-    )
-    db.add(usuario)
-    db.commit()
-    db.refresh(pessoa)
-    db.refresh(usuario)
-
-    return RegisterOut(pessoa=pessoa, usuario=usuario)
+    while True:
+        token = "".join(secrets.choice(chars) for _ in range(20))
+        existe = db.scalar(select(Pessoa.id).where(Pessoa.login_token == token))
+        if not existe:
+            return token
 
 
-# --- Login no estilo do outro projeto, com cookies access/refresh ---
-
-
-class LoginInput(BaseModel):
-    # igual ao outro projeto: "usuario" (email ou CPF) + "senha"
-    usuario: str
-    senha: str
-
-
-@router.post(
-    "/login",
-    response_model=None,
-    status_code=status.HTTP_200_OK,
-)
-def login_user(
-    payload: LoginInput,
-    db: Session = Depends(get_db),
-):
-    # helper para distinguir e-mail vs CPF
-    def is_email(valor: str) -> bool:
-        return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
-
-    # busca por e-mail ou CPF
-    if is_email(payload.usuario):
-        usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
-    else:
-        pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
-        if not pessoa:
-            raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-
-        # aqui uso o campo pessoa_id (como no register)
-        usuario = (
-            db.query(Usuario)
-            .filter(Usuario.pessoa_id == pessoa.id)
-            .first()
-        )
-
-    # valida usuário + senha (usando hash)
-    if not usuario or not verify_password(payload.senha, usuario.senha_hash):
-        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-
-    # geração dos tokens
-    # importante: aqui usamos id = Usuario.id (PK), igual ao /me
+def montar_resposta_login(usuario: Usuario) -> JSONResponse:
     access_token = criar_token(
         {"id": usuario.id, "sub": usuario.email, "tipo": "access"},
-        expires_in=60 * 24 * 7,  # 7 dias
+        expires_in=60 * 24 * 7,
     )
     refresh_token = criar_token(
         {"id": usuario.id, "sub": usuario.email, "tipo": "refresh"},
-        expires_in=60 * 24 * 30,  # 30 dias
+        expires_in=60 * 24 * 30,
     )
 
-    # monta a resposta com cookies
-    response = JSONResponse(content={"message": "Login com sucesso"})
+    response = JSONResponse(
+        content={
+            "message": "Login com sucesso",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "usuario": {
+                "id": usuario.id,
+                "email": usuario.email,
+                "is_active": usuario.is_active,
+                "last_login_at": usuario.last_login_at.isoformat() if usuario.last_login_at else None,
+                "pessoa": {
+                    "id": usuario.pessoa.id if usuario.pessoa else None,
+                    "nome": usuario.pessoa.nome if usuario.pessoa else None,
+                    "cpf": usuario.pessoa.cpf if usuario.pessoa else None,
+                    "telefone": usuario.pessoa.telefone if usuario.pessoa else None,
+                    "login_token": usuario.pessoa.login_token if usuario.pessoa else None,
+                },
+            },
+        }
+    )
+
     response.set_cookie(
         "access_token",
         access_token,
@@ -171,7 +108,119 @@ def login_user(
     return response
 
 
-# --- /me lendo access_token do cookie ---
+@router.post(
+    "/register",
+    response_model=RegisterOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def register(payload: RegisterIn, db: Session = Depends(get_db)):
+    cpf_normalizado = normalizar_cpf(payload.pessoa.cpf)
+
+    if db.scalar(select(Usuario.id).where(Usuario.email == payload.usuario.email)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="E-mail já cadastrado",
+        )
+
+    if cpf_normalizado and db.scalar(select(Pessoa.id).where(Pessoa.cpf == cpf_normalizado)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="CPF já cadastrado",
+        )
+
+    pessoa = Pessoa(
+        nome=payload.pessoa.nome,
+        cpf=cpf_normalizado,
+        data_nascimento=payload.pessoa.data_nascimento,
+        telefone=payload.pessoa.telefone,
+        login_token=gerar_login_token(db),
+    )
+    db.add(pessoa)
+    db.flush()
+
+    usuario = Usuario(
+        pessoa_id=pessoa.id,
+        email=payload.usuario.email,
+        senha_hash=hash_password(payload.usuario.senha),
+        is_active=True,
+    )
+    db.add(usuario)
+    db.commit()
+    db.refresh(pessoa)
+    db.refresh(usuario)
+
+    return RegisterOut(pessoa=pessoa, usuario=usuario)
+
+
+@router.post(
+    "/login",
+    status_code=status.HTTP_200_OK,
+)
+def login_user(payload: LoginInput, db: Session = Depends(get_db)):
+    valor_login = payload.usuario.strip()
+
+    def is_email(valor: str) -> bool:
+        return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
+
+    if is_email(valor_login):
+        usuario = (
+            db.query(Usuario)
+            .options(joinedload(Usuario.pessoa))
+            .filter(Usuario.email == valor_login)
+            .first()
+        )
+    else:
+        cpf_normalizado = normalizar_cpf(valor_login)
+        pessoa = db.query(Pessoa).filter(Pessoa.cpf == cpf_normalizado).first()
+        if not pessoa:
+            raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+
+        usuario = (
+            db.query(Usuario)
+            .options(joinedload(Usuario.pessoa))
+            .filter(Usuario.pessoa_id == pessoa.id)
+            .first()
+        )
+
+    if not usuario or not verify_password(payload.senha, usuario.senha_hash):
+        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+
+    if not usuario.is_active:
+        raise HTTPException(status_code=403, detail="Usuário inativo")
+
+    usuario.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(usuario)
+
+    return montar_resposta_login(usuario)
+
+
+@router.post(
+    "/login-executavel",
+    status_code=status.HTTP_200_OK,
+)
+def login_executavel(payload: LoginExecutavelInput, db: Session = Depends(get_db)):
+    token = payload.token.strip()
+
+    usuario = (
+        db.query(Usuario)
+        .join(Pessoa, Pessoa.id == Usuario.pessoa_id)
+        .options(joinedload(Usuario.pessoa))
+        .filter(Pessoa.login_token == token)
+        .first()
+    )
+
+    if not usuario:
+        raise HTTPException(status_code=401, detail="Token de login inválido")
+
+    if not usuario.is_active:
+        raise HTTPException(status_code=403, detail="Usuário inativo")
+
+    usuario.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(usuario)
+
+    return montar_resposta_login(usuario)
 
 
 @router.get("/me")
@@ -190,7 +239,6 @@ def get_me(request: Request, db: Session = Depends(get_db)):
             detail="Token inválido",
         )
 
-    # ✅ pega o JTI (UUID) de dentro do JWT
     jti = payload.get("jti")
     if not jti:
         raise HTTPException(
@@ -198,14 +246,12 @@ def get_me(request: Request, db: Session = Depends(get_db)):
             detail="Token inválido",
         )
 
-    # ✅ valida blacklist pelo jti (não pelo token inteiro)
     if db.scalar(select(TokenBlacklist.id).where(TokenBlacklist.jti == jti)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expirado ou inválido",
         )
 
-    # agora pegamos SOMENTE o "id" do payload (Usuario.id)
     uid = payload.get("id")
     if uid is None:
         raise HTTPException(
@@ -236,23 +282,20 @@ def get_me(request: Request, db: Session = Depends(get_db)):
     return {
         "id": user.id,
         "email": user.email,
+        "is_active": user.is_active,
+        "last_login_at": user.last_login_at,
         "pessoa": {
             "id": user.pessoa.id if user.pessoa else None,
             "nome": user.pessoa.nome if user.pessoa else None,
             "cpf": user.pessoa.cpf if user.pessoa else None,
+            "telefone": user.pessoa.telefone if user.pessoa else None,
+            "login_token": user.pessoa.login_token if user.pessoa else None,
         },
     }
 
 
-# --- refresh: usa SÓ o cookie refresh_token ---
-
-
 @router.post("/refresh")
 def refresh_token(request: Request, db: Session = Depends(get_db)):
-    # LOGS para debug (igual ao outro projeto)
-    print("[REFRESH] Cookies recebidos:", dict(request.cookies))
-    print("[REFRESH] Authorization:", request.headers.get("authorization"))
-
     token = request.cookies.get("refresh_token")
     if not token:
         raise HTTPException(status_code=400, detail="refreshToken não fornecido")
@@ -265,17 +308,29 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     if not email:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+    usuario = (
+        db.query(Usuario)
+        .options(joinedload(Usuario.pessoa))
+        .filter(Usuario.email == email)
+        .first()
+    )
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    # aqui é importante manter o mesmo padrão de "id" do access token:
+    if not usuario.is_active:
+        raise HTTPException(status_code=403, detail="Usuário inativo")
+
     novo_auth = criar_token(
         {"id": usuario.id, "sub": usuario.email, "tipo": "access"},
         expires_in=60 * 24 * 7,
     )
 
-    response = JSONResponse(content={"message": "Token renovado"})
+    response = JSONResponse(
+        content={
+            "message": "Token renovado",
+            "access_token": novo_auth,
+        }
+    )
     response.set_cookie(
         "access_token",
         novo_auth,
@@ -296,28 +351,20 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     return response
 
 
-
-# --- logout: grava na blacklist e apaga cookies ---
-
-
 @router.post("/logout")
-def logout(
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db),
-):
+def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     access_token = request.cookies.get("access_token")
+
     if access_token:
         try:
             payload = decode_token(access_token)
             if payload:
-                # usamos o próprio token como jti (simples)
-                db.add(TokenBlacklist(jti=access_token))
-                db.commit()
-        except Exception as e:
-            print(f"[ERRO LOGOUT] {e}")
-    else:
-        print("[LOGOUT] Token não enviado")
+                jti = payload.get("jti")
+                if jti and not db.scalar(select(TokenBlacklist.id).where(TokenBlacklist.jti == jti)):
+                    db.add(TokenBlacklist(jti=jti))
+                    db.commit()
+        except Exception:
+            pass
 
     delete_kwargs = {"path": "/"}
     if cookie_domain:
