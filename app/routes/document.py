@@ -71,10 +71,8 @@ def looks_like_empty_extraction(text: str, total_paginas: int) -> bool:
     return False
 
 
-def generate_uuid12() -> str:
-    alphabet = string.ascii_lowercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(12))
-
+def generate_document_uuid12() -> str:
+    return secrets.token_hex(32)
 
 def build_snippet(text: Optional[str], query: str, max_len: int = 220) -> Optional[str]:
     if not text:
@@ -127,10 +125,10 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Arquivo sem nome.")
 
     hoje_str = datetime.utcnow().strftime("%Y-%m-%d")
-    uuid12 = generate_uuid12()
+    document_uuid = generate_document_uuid12()
 
     ext = Path(file.filename).suffix.lower()
-    bucket_key = f"{meta_obj.cliente_id}/{hoje_str}/{uuid12}{ext}"
+    bucket_key = f"{meta_obj.cliente_id}/{hoje_str}/{document_uuid}{ext}"
 
     content = await file.read()
     tamanho_bytes = len(content)
@@ -149,7 +147,7 @@ async def upload_document(
         )
 
     documento = Documento(
-        uuid=uuid12,
+        uuid=document_uuid,
         cliente_id=meta_obj.cliente_id,
         bucket_key=bucket_key,
         filename=file.filename,

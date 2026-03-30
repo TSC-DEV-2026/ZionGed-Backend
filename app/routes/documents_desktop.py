@@ -1,5 +1,6 @@
 import hashlib
 import os
+import secrets
 import posixpath
 import tempfile
 import zipfile
@@ -466,8 +467,8 @@ async def upload_document_desktop_massa(
 
             hoje_str = datetime.utcnow().strftime("%Y-%m-%d")
             ext = Path(nome_original).suffix.lower()
-            uuid12 = uuid4().hex[:12]
-            bucket_key = f"{payload_data.cliente_id}/{hoje_str}/{uuid12}{ext}"
+            document_uuid = secrets.token_hex(32)
+            bucket_key = f"{payload_data.cliente_id}/{hoje_str}/{document_uuid}{ext}"
 
             storage.upload_bytes(
                 content=content,
@@ -476,7 +477,7 @@ async def upload_document_desktop_massa(
             )
 
             documento = Documento(
-                uuid=uuid12,
+                uuid=document_uuid,
                 cliente_id=payload_data.cliente_id,
                 bucket_key=bucket_key,
                 filename=Path(nome_original).name,
