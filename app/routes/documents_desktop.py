@@ -20,6 +20,9 @@ from app.schemas.documents_desktop import (
     DocumentoDesktopDownloadMassaIn,
     DocumentoDesktopSearchIn,
     DocumentoDesktopSearchOutItem,
+    UploadDesktopBatchIn,
+    UploadDesktopBatchItemResult,
+    UploadDesktopBatchOut,
     UploadDesktopMeta,
 )
 from app.services.document_processor import extrair_texto_pdf_bytes
@@ -170,6 +173,413 @@ def aplicar_filtros_documentos(query, payload):
     return query
 
 
+def split_text(valor: str, separador: str) -> list[str]:
+    if separador == "":
+        return [valor]
+    return [parte.strip() for parte in valor.split(separador)]
+
+
+def extrair_do_arquivo(nome_original: str, posicao: int, separador: str) -> str:
+    nome_sem_extensao = Path(nome_original).stem
+    partes = [p for p in split_text(nome_sem_extensao, separador) if p.strip()]
+    indice = posicao - 1
+
+    if indice < 0 or indice >= len(partes):
+        return ""
+
+    return partes[indice].strip()
+
+
+def extrair_da_pasta(pasta_relativa: str | None, pasta_nivel: int, posicao: int, separador: str) -> str:
+    if not pasta_relativa:
+        return ""
+
+    pasta_relativa = normalizar_filepath(pasta_relativa)
+    if not pasta_relativa:
+        return ""
+
+    pastas = [p.strip() for p in pasta_relativa.split("/") if p.strip()]
+    if not pastas:
+        return ""
+
+    idx_pasta = len(pastas) - 1 - pasta_nivel
+    if idx_pasta < 0 or idx_pasta >= len(pastas):
+        return ""
+
+    pasta_nome = pastas[idx_pasta]
+    partes = [p for p in split_text(pasta_nome, separador) if p.strip()]
+    idx_parte = posicao - 1
+
+    if idx_parte < 0 or idx_parte >= len(partes):
+        return ""
+
+    return partes[idx_parte].strip()
+
+
+def montar_tags_automaticas(meta_data: UploadDesktopMeta, nome_original: str) -> dict[str, str]:
+    tags_automaticas = {}
+
+    for item in meta_data.mapa_nome_arquivo:
+        origem = item.origem.strip().lower()
+        valor = ""
+
+        if origem == "arquivo":
+            valor = extrair_do_arquivo(
+                nome_original=nome_original,
+                posicao=item.posicao,
+                separador=item.separador or "_",
+            )
+        elif origem == "pasta":
+            valor = extrair_da_pasta(
+                pasta_relativa=meta_data.pasta_relativa,
+                pasta_nivel=item.pasta_nivel,
+                posicao=item.posicao,
+                separador=item.separador or "_",
+            )
+        elif origem == "manual":
+            valor = (item.valor_manual or "").strip()
+
+        if valor:
+            tags_automaticas[item.chave.strip()] = valor
+
+    return tags_automaticas
+
+
+def montar_tags_manuais(meta_data: UploadDesktopMeta) -> dict[str, str]:
+    tags_manuais = {}
+
+    for item in meta_data.tags:
+        chave = item.chave.strip()
+        valor = item.valor.strip()
+
+        if chave and valor:
+            tags_manuais[chave] = valor
+
+    return tags_manuais
+
+
+def validar_campos_obrigatorios(regra: RegraDocumento, tags_finais: dict[str, str]):
+    faltantes = []
+
+    for campo in regra.campos:
+        if not getattr(campo, "obrigatorio", False):
+            continue
+
+        chave = (campo.chave_tag or "").strip()
+        if not chave:
+            continue
+
+        valor = tags_finais.get(chave)
+        if valor is None or str(valor).strip() == "":
+            faltantes.append(chave)
+
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Campos obrigatórios não preenchidos: {', '.join(faltantes)}",
+        )
+
+def split_text(valor: str, separador: str) -> list[str]:
+    if separador == "":
+        return [valor]
+    return [parte.strip() for parte in valor.split(separador)]
+
+
+def extrair_do_arquivo(nome_original: str, posicao: int, separador: str) -> str:
+    nome_sem_extensao = Path(nome_original).stem
+    partes = [p for p in split_text(nome_sem_extensao, separador) if p.strip()]
+    indice = posicao - 1
+
+    if indice < 0 or indice >= len(partes):
+        return ""
+
+    return partes[indice].strip()
+
+
+def extrair_da_pasta(pasta_relativa: str | None, pasta_nivel: int, posicao: int, separador: str) -> str:
+    if not pasta_relativa:
+        return ""
+
+    pasta_relativa = normalizar_filepath(pasta_relativa)
+    if not pasta_relativa:
+        return ""
+
+    pastas = [p.strip() for p in pasta_relativa.split("/") if p.strip()]
+    if not pastas:
+        return ""
+
+    idx_pasta = len(pastas) - 1 - pasta_nivel
+    if idx_pasta < 0 or idx_pasta >= len(pastas):
+        return ""
+
+    pasta_nome = pastas[idx_pasta]
+    partes = [p for p in split_text(pasta_nome, separador) if p.strip()]
+    idx_parte = posicao - 1
+
+    if idx_parte < 0 or idx_parte >= len(partes):
+        return ""
+
+    return partes[idx_parte].strip()
+
+
+def montar_tags_automaticas_generico(mapa_nome_arquivo, pasta_relativa: str | None, nome_original: str) -> dict[str, str]:
+    tags_automaticas = {}
+
+    for item in mapa_nome_arquivo:
+        origem = item.origem.strip().lower()
+        valor = ""
+
+        if origem == "arquivo":
+            valor = extrair_do_arquivo(
+                nome_original=nome_original,
+                posicao=item.posicao,
+                separador=item.separador or "_",
+            )
+        elif origem == "pasta":
+            valor = extrair_da_pasta(
+                pasta_relativa=pasta_relativa,
+                pasta_nivel=item.pasta_nivel,
+                posicao=item.posicao,
+                separador=item.separador or "_",
+            )
+        elif origem == "manual":
+            valor = (item.valor_manual or "").strip()
+
+        if valor:
+            tags_automaticas[item.chave.strip()] = valor
+
+    return tags_automaticas
+
+
+def montar_tags_manuais_generico(tags) -> dict[str, str]:
+    tags_manuais = {}
+
+    for item in tags:
+        chave = item.chave.strip()
+        valor = item.valor.strip()
+
+        if chave and valor:
+            tags_manuais[chave] = valor
+
+    return tags_manuais
+
+
+def validar_campos_obrigatorios(regra: RegraDocumento, tags_finais: dict[str, str]):
+    faltantes = []
+
+    for campo in regra.campos:
+        if not getattr(campo, "obrigatorio", False):
+            continue
+
+        chave = (campo.chave_tag or "").strip()
+        if not chave:
+            continue
+
+        valor = tags_finais.get(chave)
+        if valor is None or str(valor).strip() == "":
+            faltantes.append(chave)
+
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Campos obrigatórios não preenchidos: {', '.join(faltantes)}",
+        )
+
+@router.post("/upload-massa", response_model=UploadDesktopBatchOut)
+async def upload_document_desktop_massa(
+    payload: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        payload_data = UploadDesktopBatchIn.model_validate_json(payload)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Payload inválido: {e}")
+
+    if not payload_data.itens:
+        raise HTTPException(status_code=400, detail="Nenhum item informado no payload.")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="Nenhum arquivo enviado.")
+
+    if len(files) != len(payload_data.itens):
+        raise HTTPException(
+            status_code=400,
+            detail="A quantidade de arquivos enviados não corresponde à quantidade de itens do payload.",
+        )
+
+    if len(files) > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="O limite por lote é de 500 arquivos.",
+        )
+
+    regra = (
+        db.query(RegraDocumento)
+        .options(joinedload(RegraDocumento.campos))
+        .filter(RegraDocumento.id == payload_data.regra_id)
+        .first()
+    )
+
+    if not regra:
+        raise HTTPException(status_code=404, detail="Regra não encontrada.")
+
+    modo = payload_data.modo_tags.strip().lower()
+    if modo not in ("manual", "arquivo", "hibrido"):
+        raise HTTPException(status_code=400, detail="modo_tags inválido. Use manual, arquivo ou hibrido.")
+
+    resultados: list[UploadDesktopBatchItemResult] = []
+
+    for idx, upload_file in enumerate(files):
+        item = payload_data.itens[idx]
+        nome_cliente = (item.client_file_name or "").strip() or f"arquivo_{idx + 1}"
+
+        try:
+            nome_original = (upload_file.filename or nome_cliente or "arquivo_sem_nome").strip()
+            if not nome_original:
+                nome_original = nome_cliente or "arquivo_sem_nome"
+
+            content_type = upload_file.content_type or "application/octet-stream"
+
+            tags_automaticas = montar_tags_automaticas_generico(
+                mapa_nome_arquivo=item.mapa_nome_arquivo,
+                pasta_relativa=item.pasta_relativa,
+                nome_original=nome_original,
+            )
+
+            tags_manuais = montar_tags_manuais_generico(item.tags)
+
+            if modo == "manual":
+                tags_finais = tags_manuais
+            elif modo == "arquivo":
+                tags_finais = tags_automaticas
+            else:
+                tags_finais = {**tags_automaticas, **tags_manuais}
+
+            validar_campos_obrigatorios(regra=regra, tags_finais=tags_finais)
+
+            filepath = normalizar_filepath(item.pasta_relativa)
+
+            content = await upload_file.read()
+            tamanho_bytes = len(content)
+            hash_sha256 = hashlib.sha256(content).hexdigest() if tamanho_bytes > 0 else None
+
+            hoje_str = datetime.utcnow().strftime("%Y-%m-%d")
+            ext = Path(nome_original).suffix.lower()
+            uuid12 = uuid4().hex[:12]
+            bucket_key = f"{payload_data.cliente_id}/{hoje_str}/{uuid12}{ext}"
+
+            storage.upload_bytes(
+                content=content,
+                key=bucket_key,
+                content_type=content_type,
+            )
+
+            documento = Documento(
+                uuid=uuid12,
+                cliente_id=payload_data.cliente_id,
+                bucket_key=bucket_key,
+                filename=Path(nome_original).name,
+                filepath=filepath,
+                content_type=content_type,
+                tamanho_bytes=tamanho_bytes,
+                hash_sha256=hash_sha256,
+            )
+
+            db.add(documento)
+            db.flush()
+
+            db.add(
+                Tag(
+                    documento_id=documento.id,
+                    chave=REGRA_TAG_KEY,
+                    valor=str(payload_data.regra_id),
+                )
+            )
+
+            for chave, valor in tags_finais.items():
+                db.add(
+                    Tag(
+                        documento_id=documento.id,
+                        chave=chave,
+                        valor=valor,
+                    )
+                )
+
+            texto_extraido = ""
+            texto_normalizado = ""
+            total_paginas = None
+            status_processamento = False
+            erro_processamento = None
+
+            try:
+                if Path(nome_original).suffix.lower() == ".pdf":
+                    texto_extraido, total_paginas = extrair_texto_pdf_bytes(content)
+                else:
+                    texto_extraido = ""
+                    total_paginas = None
+
+                texto_normalizado = " ".join(texto_extraido.split()) if texto_extraido else ""
+                status_processamento = True
+            except Exception as e:
+                erro_processamento = str(e)
+                status_processamento = False
+
+            db.add(
+                DocumentoConteudo(
+                    documento_id=documento.id,
+                    texto_extraido=texto_extraido,
+                    texto_normalizado=texto_normalizado,
+                    total_paginas=total_paginas,
+                    ocr_aplicado=False,
+                    status_processamento=status_processamento,
+                    erro_processamento=erro_processamento,
+                    processado_em=datetime.utcnow(),
+                )
+            )
+
+            db.commit()
+            db.refresh(documento)
+
+            resultados.append(
+                UploadDesktopBatchItemResult(
+                    client_file_name=nome_cliente,
+                    sucesso=True,
+                    documento_id=documento.id,
+                    uuid=documento.uuid,
+                    filename=documento.filename,
+                    filepath=documento.filepath,
+                    bucket_key=documento.bucket_key,
+                    erro=None,
+                )
+            )
+
+        except Exception as e:
+            db.rollback()
+            resultados.append(
+                UploadDesktopBatchItemResult(
+                    client_file_name=nome_cliente,
+                    sucesso=False,
+                    erro=str(e),
+                )
+            )
+
+    total_recebidos = len(payload_data.itens)
+    total_processados = len(resultados)
+    total_sucesso = len([r for r in resultados if r.sucesso])
+    total_erro = len([r for r in resultados if not r.sucesso])
+
+    return UploadDesktopBatchOut(
+        message="Upload em massa processado.",
+        cliente_id=payload_data.cliente_id,
+        regra_id=payload_data.regra_id,
+        total_recebidos=total_recebidos,
+        total_processados=total_processados,
+        total_sucesso=total_sucesso,
+        total_erro=total_erro,
+        resultados=resultados,
+    )
+
 @router.post("/upload")
 async def upload_document_desktop(
     meta: str = Form(...),
@@ -197,34 +607,21 @@ async def upload_document_desktop(
 
     content_type = file.content_type or "application/octet-stream"
 
-    nome_sem_extensao = Path(nome_original).stem
-    partes_nome = [p.strip() for p in nome_sem_extensao.split("_") if p.strip()]
-
-    tags_arquivo = {}
-    for item in meta_data.mapa_nome_arquivo:
-        indice = item.posicao - 1
-        if 0 <= indice < len(partes_nome):
-            valor = partes_nome[indice].strip()
-            if valor:
-                tags_arquivo[item.chave] = valor
-
-    tags_manuais = {}
-    for item in meta_data.tags:
-        chave = item.chave.strip()
-        valor = item.valor.strip()
-        if chave and valor:
-            tags_manuais[chave] = valor
+    tags_automaticas = montar_tags_automaticas(meta_data=meta_data, nome_original=nome_original)
+    tags_manuais = montar_tags_manuais(meta_data=meta_data)
 
     modo = meta_data.modo_tags.strip().lower()
 
     if modo == "manual":
         tags_finais = tags_manuais
     elif modo == "arquivo":
-        tags_finais = tags_arquivo
+        tags_finais = tags_automaticas
     elif modo == "hibrido":
-        tags_finais = {**tags_arquivo, **tags_manuais}
+        tags_finais = {**tags_automaticas, **tags_manuais}
     else:
         raise HTTPException(status_code=400, detail="modo_tags inválido. Use manual, arquivo ou hibrido.")
+
+    validar_campos_obrigatorios(regra=regra, tags_finais=tags_finais)
 
     filepath = normalizar_filepath(meta_data.pasta_relativa)
 
@@ -320,6 +717,9 @@ async def upload_document_desktop(
             "tags_criadas": [{"chave": k, "valor": v} for k, v in tags_finais.items()],
         }
 
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao processar upload: {e}")
