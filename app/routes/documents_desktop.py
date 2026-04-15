@@ -32,7 +32,7 @@ from app.services.storage import StorageService
 router = APIRouter(prefix="/documents-desktop", tags=["Documents Desktop"])
 storage = StorageService()
 
-REGRA_TAG_KEY = "__regra_id__"
+REGRA_TAG_KEY = "regra id"
 
 
 def normalizar_filepath(valor: str | None) -> str | None:
