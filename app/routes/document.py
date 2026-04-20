@@ -360,7 +360,7 @@ def list_user_tags(
             TagUser,
             (TagUser.documento_id == Documento.id) & (TagUser.chave == "id_user"),
         )
-        .filter(TagUser.valor == str(current_user.id))
+        .filter(TagUser.valor == str(current_user.pessoa_id))
         .filter(Tag.chave.notin_(["id_user"]))
         .distinct()
         .order_by(Tag.chave.asc())
