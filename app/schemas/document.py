@@ -35,11 +35,10 @@ class DocumentoOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
-
 class DocumentoUploadMeta(BaseModel):
     cliente_id: int
+    regra_id: Optional[int] = None
     tags: List[TagCreate] = []
-
 
 class DocumentoUpdate(BaseModel):
     filename: Optional[str] = None

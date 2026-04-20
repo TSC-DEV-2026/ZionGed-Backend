@@ -1,4 +1,3 @@
-import os
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session, joinedload
@@ -6,9 +5,8 @@ from sqlalchemy import select
 
 from app.database.connection import get_db
 from app.models.auth import Usuario, TokenBlacklist
+from config.settings import settings
 
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
-ALGORITHM = os.getenv("ALGORITHM", "HS256")
 COOKIE_CANDIDATES = ("session.xaccess", "access_token", "token")
 
 
@@ -37,20 +35,21 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Usuario
     if not token:
         _invalid_token()
 
-    blacklisted = db.execute(
-        select(TokenBlacklist.id).where(TokenBlacklist.jti == token)
-    ).scalar_one_or_none()
-    if blacklisted:
-        _invalid_token()
-
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     except JWTError:
         _invalid_token()
     except Exception:
         _invalid_token()
 
-    uid = payload.get("sub") or payload.get("user_id") or payload.get("uid")
+    jti = payload.get("jti")
+    if not jti:
+        _invalid_token()
+
+    if db.execute(select(TokenBlacklist.id).where(TokenBlacklist.jti == str(jti))).scalar_one_or_none():
+        _invalid_token()
+
+    uid = payload.get("id") or payload.get("sub") or payload.get("user_id") or payload.get("uid")
     try:
         uid = int(uid)
     except Exception:

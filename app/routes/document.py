@@ -12,9 +12,12 @@ from pypdf import PdfReader
 from sqlalchemy import func, or_
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, aliased
 from pydantic import ValidationError
 
+from app.dependencies.auth import get_current_user
+from app.models.auth import Usuario
+from app.models.regra_documento import RegraDocumento
 from app.database.connection import get_db
 from app.models.document import Documento, Tag, DocumentoConteudo
 from app.schemas.document import (
@@ -31,6 +34,41 @@ from app.services.storage import StorageService
 router = APIRouter()
 storage = StorageService()
 
+REGRA_TAG_KEY = "regra id"
+USER_TAG_KEY = "id_user"
+
+def montar_tags_manuais(tags):
+    retorno = {}
+    for item in tags:
+        chave = item.chave.strip()
+        valor = item.valor.strip()
+        if chave and valor:
+            retorno[chave] = valor
+    return retorno
+
+def validar_campos_obrigatorios(regra, tags_finais: dict[str, str]):
+    faltantes = []
+    for campo in regra.campos:
+        if not campo.obrigatorio:
+            continue
+        chave = (campo.chave_tag or "").strip()
+        if not chave:
+            continue
+        valor = tags_finais.get(chave)
+        if valor is None or str(valor).strip() == "":
+            faltantes.append(chave)
+
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Campos obrigatórios não preenchidos: {', '.join(faltantes)}",
+        )
+
+def anexar_tags_sistema(tags_finais: dict[str, str], pessoa_id: int, regra_id: int | None = None):
+    tags_finais["id_user"] = str(pessoa_id)
+    if regra_id is not None:
+        tags_finais[REGRA_TAG_KEY] = str(regra_id)
+    return tags_finais
 
 def normalize_text(text: str) -> str:
     if not text:
@@ -41,7 +79,6 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> Tuple[str, int]:
     reader = PdfReader(BytesIO(pdf_bytes))
@@ -102,16 +139,12 @@ def build_snippet(text: Optional[str], query: str, max_len: int = 220) -> Option
 
     return trecho
 
-
-@router.post(
-    "/upload",
-    response_model=DocumentoOut,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/upload", response_model=DocumentoOut, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     meta: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ) -> Any:
     try:
         meta_obj = DocumentoUploadMeta.model_validate_json(meta)
@@ -123,6 +156,31 @@ async def upload_document(
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="Arquivo sem nome.")
+
+    regra = None
+    if meta_obj.regra_id is not None:
+        regra = (
+            db.query(RegraDocumento)
+            .options(joinedload(RegraDocumento.campos))
+            .filter(RegraDocumento.id == meta_obj.regra_id)
+            .first()
+        )
+        if not regra:
+            raise HTTPException(status_code=404, detail="Regra não encontrada.")
+
+    tags_finais = montar_tags_manuais(meta_obj.tags)
+
+    # garante que ninguém injete id_user manualmente
+    tags_finais.pop("id_user", None)
+
+    if regra:
+        validar_campos_obrigatorios(regra, tags_finais)
+
+    tags_finais = anexar_tags_sistema(
+        tags_finais=tags_finais,
+        pessoa_id=current_user.pessoa_id,
+        regra_id=meta_obj.regra_id,
+    )
 
     hoje_str = datetime.utcnow().strftime("%Y-%m-%d")
     document_uuid = generate_document_uuid12()
@@ -156,11 +214,11 @@ async def upload_document(
         hash_sha256=hash_sha256,
     )
 
-    for tag in meta_obj.tags:
+    for chave, valor in tags_finais.items():
         documento.tags.append(
             Tag(
-                chave=tag.chave,
-                valor=tag.valor,
+                chave=chave,
+                valor=valor,
             )
         )
 
@@ -169,7 +227,6 @@ async def upload_document(
     db.refresh(documento)
 
     return documento
-
 
 @router.get(
     "/search",
@@ -289,27 +346,28 @@ def download_document(
         },
     )
 
-
 @router.get("/tags")
-def listar_tags_disponiveis(
-    cliente_id: int | None = None,
+def list_user_tags(
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
-    query = db.query(Tag.chave).distinct()
+    TagUser = aliased(Tag)
 
-    if cliente_id is not None:
-        query = (
-            db.query(Tag.chave)
-            .join(Documento, Documento.id == Tag.documento_id)
-            .filter(Documento.cliente_id == cliente_id)
-            .distinct()
+    rows = (
+        db.query(Tag.chave)
+        .join(Documento, Documento.id == Tag.documento_id)
+        .join(
+            TagUser,
+            (TagUser.documento_id == Documento.id) & (TagUser.chave == "id_user"),
         )
+        .filter(TagUser.valor == str(current_user.id))
+        .filter(Tag.chave.notin_(["id_user"]))
+        .distinct()
+        .order_by(Tag.chave.asc())
+        .all()
+    )
 
-    rows = query.order_by(Tag.chave).all()
-    tags = [row[0] for row in rows]
-
-    return {"tags": tags}
-
+    return [row[0] for row in rows]
 
 @router.put(
     "/{uuid}/update",

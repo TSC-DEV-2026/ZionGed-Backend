@@ -14,6 +14,8 @@ from sqlalchemy import and_
 from sqlalchemy.orm import Session, aliased, joinedload
 from starlette.background import BackgroundTask
 
+from app.dependencies.auth import get_current_user
+from app.models.auth import Usuario
 from app.database.connection import get_db
 from app.models.document import Documento, DocumentoConteudo, Tag
 from app.models.regra_documento import RegraDocumento
@@ -391,6 +393,7 @@ async def upload_document_desktop_massa(
     payload: str = Form(...),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
     try:
         payload_data = UploadDesktopBatchIn.model_validate_json(payload)
@@ -456,6 +459,8 @@ async def upload_document_desktop_massa(
                 tags_finais = tags_automaticas
             else:
                 tags_finais = {**tags_automaticas, **tags_manuais}
+
+            tags_finais["id_user"] = str(current_user.pessoa_id)
 
             validar_campos_obrigatorios(regra=regra, tags_finais=tags_finais)
 
@@ -586,6 +591,7 @@ async def upload_document_desktop(
     meta: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
     try:
         meta_data = UploadDesktopMeta.model_validate_json(meta)
@@ -621,6 +627,8 @@ async def upload_document_desktop(
         tags_finais = {**tags_automaticas, **tags_manuais}
     else:
         raise HTTPException(status_code=400, detail="modo_tags inválido. Use manual, arquivo ou hibrido.")
+
+    tags_finais["id_user"] = str(current_user.pessoa_id)
 
     validar_campos_obrigatorios(regra=regra, tags_finais=tags_finais)
 
@@ -724,7 +732,6 @@ async def upload_document_desktop(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao processar upload: {e}")
-
 
 @router.post("/search", response_model=list[DocumentoDesktopSearchOutItem])
 def search_documents_desktop(
