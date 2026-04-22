@@ -140,6 +140,95 @@ def build_snippet(text: Optional[str], query: str, max_len: int = 220) -> Option
 
     return trecho
 
+
+def only_digits(value: str | None) -> str:
+    return re.sub(r"\D+", "", value or "")
+
+
+def is_valid_cpf(value: str | None) -> bool:
+    cpf = only_digits(value)
+    if len(cpf) != 11:
+        return False
+    if cpf == cpf[0] * 11:
+        return False
+
+    soma = sum(int(cpf[i]) * (10 - i) for i in range(9))
+    resto = (soma * 10) % 11
+    d1 = 0 if resto == 10 else resto
+    if d1 != int(cpf[9]):
+        return False
+
+    soma = sum(int(cpf[i]) * (11 - i) for i in range(10))
+    resto = (soma * 10) % 11
+    d2 = 0 if resto == 10 else resto
+    return d2 == int(cpf[10])
+
+
+def is_valid_cnpj(value: str | None) -> bool:
+    cnpj = only_digits(value)
+    if len(cnpj) != 14:
+        return False
+    if cnpj == cnpj[0] * 14:
+        return False
+
+    pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    soma = sum(int(cnpj[i]) * pesos1[i] for i in range(12))
+    resto = soma % 11
+    d1 = 0 if resto < 2 else 11 - resto
+    if d1 != int(cnpj[12]):
+        return False
+
+    pesos2 = [6] + pesos1
+    soma = sum(int(cnpj[i]) * pesos2[i] for i in range(13))
+    resto = soma % 11
+    d2 = 0 if resto < 2 else 11 - resto
+    return d2 == int(cnpj[13])
+
+
+def format_cpf(value: str | None) -> str | None:
+    cpf = only_digits(value)
+    if len(cpf) != 11:
+        return None
+    return f"{cpf[0:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:11]}"
+
+
+def format_cnpj(value: str | None) -> str | None:
+    cnpj = only_digits(value)
+    if len(cnpj) != 14:
+        return None
+    return f"{cnpj[0:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:14]}"
+
+
+def build_query_variants(q: str) -> list[str]:
+    variants: list[str] = []
+    base = (q or "").strip()
+    if not base:
+        return variants
+
+    variants.append(base)
+
+    digits = only_digits(base)
+    if digits and digits != base:
+        variants.append(digits)
+
+    if is_valid_cpf(digits):
+        masked = format_cpf(digits)
+        if masked:
+            variants.append(masked)
+    elif is_valid_cnpj(digits):
+        masked = format_cnpj(digits)
+        if masked:
+            variants.append(masked)
+
+    # unique, keep order
+    seen = set()
+    out: list[str] = []
+    for item in variants:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
 @router.post("/upload", response_model=DocumentoOut, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     meta: str = Form(...),
@@ -320,7 +409,12 @@ def search_documents(
         )
 
     if q is not None:
-        like_pattern = f"%{q}%"
+        variants = build_query_variants(q)
+        if not variants:
+            variants = [q]
+
+        like_patterns = [f"%{v}%" for v in variants if v is not None]
+
         TagQ = aliased(Tag)
         ConteudoQ = aliased(DocumentoConteudo)
 
@@ -330,12 +424,12 @@ def search_documents(
             .outerjoin(ConteudoQ, ConteudoQ.documento_id == Documento.id)
             .filter(
                 or_(
-                    TagQ.chave.ilike(like_pattern),
-                    TagQ.valor.ilike(like_pattern),
-                    Documento.filename.ilike(like_pattern),
-                    Documento.filepath.ilike(like_pattern),
-                    ConteudoQ.texto_extraido.ilike(like_pattern),
-                    ConteudoQ.texto_normalizado.ilike(like_pattern),
+                    or_(*[TagQ.chave.ilike(p) for p in like_patterns]),
+                    or_(*[TagQ.valor.ilike(p) for p in like_patterns]),
+                    or_(*[Documento.filename.ilike(p) for p in like_patterns]),
+                    or_(*[Documento.filepath.ilike(p) for p in like_patterns]),
+                    or_(*[ConteudoQ.texto_extraido.ilike(p) for p in like_patterns]),
+                    or_(*[ConteudoQ.texto_normalizado.ilike(p) for p in like_patterns]),
                 )
             )
         )
