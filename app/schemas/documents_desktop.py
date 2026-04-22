@@ -18,7 +18,7 @@ class MapaNomeArquivoItem(BaseModel):
 
 
 class UploadDesktopMeta(BaseModel):
-    cliente_id: int
+    user_id: int
     regra_id: int
     modo_tags: str = Field(..., min_length=1)  # manual | arquivo | hibrido
     pasta_relativa: Optional[str] = None
@@ -27,7 +27,7 @@ class UploadDesktopMeta(BaseModel):
 
 
 class DocumentoDesktopSearchIn(BaseModel):
-    cliente_id: int
+    user_id: int
     regra_id: Optional[int] = None
     filename: Optional[str] = None
     somente_com_filepath: bool = False
@@ -37,7 +37,7 @@ class DocumentoDesktopSearchIn(BaseModel):
 class DocumentoDesktopSearchOutItem(BaseModel):
     id: int
     uuid: str
-    cliente_id: int
+    user_id: int
     filename: str
     filepath: Optional[str] = None
     bucket_key: str
@@ -48,7 +48,7 @@ class DocumentoDesktopSearchOutItem(BaseModel):
 
 
 class DocumentoDesktopDownloadMassaIn(BaseModel):
-    cliente_id: int
+    user_id: int
     regra_id: Optional[int] = None
     uuids: List[str] = Field(default_factory=list)
     filename: Optional[str] = None
@@ -65,7 +65,7 @@ class UploadDesktopBatchItem(BaseModel):
 
 
 class UploadDesktopBatchIn(BaseModel):
-    cliente_id: int
+    user_id: int
     regra_id: int
     modo_tags: str = Field(..., min_length=1)  # manual | arquivo | hibrido
     itens: List[UploadDesktopBatchItem] = Field(default_factory=list)
@@ -84,7 +84,7 @@ class UploadDesktopBatchItemResult(BaseModel):
 
 class UploadDesktopBatchOut(BaseModel):
     message: str
-    cliente_id: int
+    user_id: int
     regra_id: int
     total_recebidos: int
     total_processados: int

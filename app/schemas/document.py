@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class TagBase(BaseModel):
@@ -24,9 +24,10 @@ class TagOut(TagBase):
 class DocumentoOut(BaseModel):
     id: int
     uuid: str
-    cliente_id: int
+    user_id: int
     bucket_key: str
     filename: str
+    filepath: Optional[str] = None
     content_type: str
     tamanho_bytes: int
     hash_sha256: Optional[str] = None
@@ -35,8 +36,12 @@ class DocumentoOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("filepath")
+    def serialize_filepath(self, v: Optional[str]) -> str:
+        return v if v is not None else "===="
+
 class DocumentoUploadMeta(BaseModel):
-    cliente_id: int
+    user_id: int
     regra_id: Optional[int] = None
     tags: List[TagCreate] = []
 
@@ -85,7 +90,7 @@ class DocumentoConteudoResponse(BaseModel):
 class DocumentoSearchInteligentItem(BaseModel):
     id: int
     uuid: str
-    cliente_id: int
+    user_id: int
     filename: str
     content_type: str
     tamanho_bytes: int

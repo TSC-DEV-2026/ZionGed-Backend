@@ -9,7 +9,7 @@ from io import BytesIO
 from math import ceil
 
 from pypdf import PdfReader
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, aliased
@@ -35,7 +35,8 @@ router = APIRouter()
 storage = StorageService()
 
 REGRA_TAG_KEY = "regra id"
-USER_TAG_KEY = "id_user"
+USER_TAG_KEY = "user_id"
+USER_TAG_KEY_LEGACY = "id_user"
 
 def montar_tags_manuais(tags):
     retorno = {}
@@ -65,7 +66,7 @@ def validar_campos_obrigatorios(regra, tags_finais: dict[str, str]):
         )
 
 def anexar_tags_sistema(tags_finais: dict[str, str], pessoa_id: int, regra_id: int | None = None):
-    tags_finais["id_user"] = str(pessoa_id)
+    tags_finais[USER_TAG_KEY] = str(pessoa_id)
     if regra_id is not None:
         tags_finais[REGRA_TAG_KEY] = str(regra_id)
     return tags_finais
@@ -171,7 +172,8 @@ async def upload_document(
     tags_finais = montar_tags_manuais(meta_obj.tags)
 
     # garante que ninguém injete id_user manualmente
-    tags_finais.pop("id_user", None)
+    tags_finais.pop(USER_TAG_KEY, None)
+    tags_finais.pop(USER_TAG_KEY_LEGACY, None)
 
     if regra:
         validar_campos_obrigatorios(regra, tags_finais)
@@ -186,7 +188,7 @@ async def upload_document(
     document_uuid = generate_document_uuid12()
 
     ext = Path(file.filename).suffix.lower()
-    bucket_key = f"{meta_obj.cliente_id}/{hoje_str}/{document_uuid}{ext}"
+    bucket_key = f"{meta_obj.user_id}/{hoje_str}/{document_uuid}{ext}"
 
     content = await file.read()
     tamanho_bytes = len(content)
@@ -206,7 +208,7 @@ async def upload_document(
 
     documento = Documento(
         uuid=document_uuid,
-        cliente_id=meta_obj.cliente_id,
+        user_id=meta_obj.user_id,
         bucket_key=bucket_key,
         filename=file.filename,
         content_type=file.content_type or "application/octet-stream",
@@ -223,6 +225,48 @@ async def upload_document(
         )
 
     db.add(documento)
+    db.flush()
+
+    texto_extraido = None
+    texto_normalizado = None
+    total_paginas = None
+    status_processamento = False
+    erro_processamento = None
+    processado_em = None
+
+    try:
+        if documento.content_type.lower() == "application/pdf" or Path(documento.filename).suffix.lower() == ".pdf":
+            texto_extraido, total_paginas = extract_text_from_pdf_bytes(content)
+            if looks_like_empty_extraction(texto_extraido, total_paginas):
+                status_processamento = False
+                erro_processamento = "Não foi possível extrair texto útil do PDF. Provável PDF escaneado ou sem camada de texto."
+                texto_extraido = None
+                texto_normalizado = None
+            else:
+                texto_normalizado = normalize_text(texto_extraido)
+                status_processamento = True
+            processado_em = datetime.utcnow()
+    except Exception as e:
+        status_processamento = False
+        erro_processamento = str(e)
+        texto_extraido = None
+        texto_normalizado = None
+        total_paginas = None
+        processado_em = datetime.utcnow()
+
+    db.add(
+        DocumentoConteudo(
+            documento_id=documento.id,
+            texto_extraido=texto_extraido,
+            texto_normalizado=texto_normalizado,
+            total_paginas=total_paginas,
+            ocr_aplicado=False,
+            status_processamento=status_processamento,
+            erro_processamento=erro_processamento,
+            processado_em=processado_em,
+        )
+    )
+
     db.commit()
     db.refresh(documento)
 
@@ -233,7 +277,7 @@ async def upload_document(
     response_model=DocumentoSearchResponse,
 )
 def search_documents(
-    cliente_id: Optional[int] = None,
+    user_id: int = Query(..., ge=1),
     tag_chave: Optional[str] = None,
     tag_valor: Optional[str] = None,
     q: Optional[str] = None,
@@ -241,40 +285,62 @@ def search_documents(
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> Any:
+    if (tag_chave is None) != (tag_valor is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Informe tag_chave e tag_valor juntos.",
+        )
+
     base_query = (
         db.query(Documento)
         .options(joinedload(Documento.tags))
     )
 
-    if cliente_id is not None:
-        base_query = base_query.filter(Documento.cliente_id == cliente_id)
+    TagUser = aliased(Tag)
+    base_query = base_query.filter(
+        db.query(TagUser.id)
+        .filter(
+            TagUser.documento_id == Documento.id,
+            TagUser.chave.in_([USER_TAG_KEY, USER_TAG_KEY_LEGACY]),
+            TagUser.valor == str(user_id),
+        )
+        .exists()
+    )
 
-    if tag_chave is not None or tag_valor is not None or q is not None:
-        base_query = (
-            base_query
-            .outerjoin(Tag, Tag.documento_id == Documento.id)
-            .outerjoin(DocumentoConteudo, DocumentoConteudo.documento_id == Documento.id)
+    if tag_chave is not None and tag_valor is not None:
+        TagFiltro = aliased(Tag)
+        base_query = base_query.filter(
+            db.query(TagFiltro.id)
+            .filter(
+                TagFiltro.documento_id == Documento.id,
+                TagFiltro.chave == tag_chave,
+                TagFiltro.valor == tag_valor,
+            )
+            .exists()
         )
 
-        if tag_chave is not None:
-            base_query = base_query.filter(Tag.chave == tag_chave)
+    if q is not None:
+        like_pattern = f"%{q}%"
+        TagQ = aliased(Tag)
+        ConteudoQ = aliased(DocumentoConteudo)
 
-        if tag_valor is not None:
-            base_query = base_query.filter(Tag.valor == tag_valor)
-
-        if q is not None:
-            like_pattern = f"%{q}%"
-            base_query = base_query.filter(
+        base_query = (
+            base_query
+            .outerjoin(TagQ, TagQ.documento_id == Documento.id)
+            .outerjoin(ConteudoQ, ConteudoQ.documento_id == Documento.id)
+            .filter(
                 or_(
-                    Tag.chave.ilike(like_pattern),
-                    Tag.valor.ilike(like_pattern),
+                    TagQ.chave.ilike(like_pattern),
+                    TagQ.valor.ilike(like_pattern),
                     Documento.filename.ilike(like_pattern),
-                    DocumentoConteudo.texto_extraido.ilike(like_pattern),
-                    DocumentoConteudo.texto_normalizado.ilike(like_pattern),
+                    Documento.filepath.ilike(like_pattern),
+                    ConteudoQ.texto_extraido.ilike(like_pattern),
+                    ConteudoQ.texto_normalizado.ilike(like_pattern),
                 )
             )
+        )
 
-        base_query = base_query.distinct()
+    base_query = base_query.distinct()
 
     total_items = (
         base_query
@@ -358,10 +424,11 @@ def list_user_tags(
         .join(Documento, Documento.id == Tag.documento_id)
         .join(
             TagUser,
-            (TagUser.documento_id == Documento.id) & (TagUser.chave == "id_user"),
+            (TagUser.documento_id == Documento.id)
+            & (TagUser.chave.in_([USER_TAG_KEY, USER_TAG_KEY_LEGACY])),
         )
         .filter(TagUser.valor == str(current_user.pessoa_id))
-        .filter(Tag.chave.notin_(["id_user"]))
+        .filter(Tag.chave.notin_([USER_TAG_KEY, USER_TAG_KEY_LEGACY]))
         .distinct()
         .order_by(Tag.chave.asc())
         .all()

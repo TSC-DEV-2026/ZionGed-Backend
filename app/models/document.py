@@ -10,7 +10,7 @@ class Documento(Base):
 
     id = Column(BigInteger, primary_key=True, index=True)
     uuid = Column(String(100), unique=True, nullable=False, index=True)
-    cliente_id = Column(BigInteger, nullable=False, index=True)
+    user_id = Column(BigInteger, nullable=False, index=True)
     bucket_key = Column(String(1000), nullable=False)
     filename = Column(String(1000), nullable=False)
     filepath = Column(String(2000), nullable=True)

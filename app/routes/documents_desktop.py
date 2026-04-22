@@ -473,7 +473,7 @@ async def upload_document_desktop_massa(
             hoje_str = datetime.utcnow().strftime("%Y-%m-%d")
             ext = Path(nome_original).suffix.lower()
             document_uuid = secrets.token_hex(32)
-            bucket_key = f"{payload_data.cliente_id}/{hoje_str}/{document_uuid}{ext}"
+            bucket_key = f"{payload_data.user_id}/{hoje_str}/{document_uuid}{ext}"
 
             storage.upload_bytes(
                 content=content,
@@ -483,7 +483,7 @@ async def upload_document_desktop_massa(
 
             documento = Documento(
                 uuid=document_uuid,
-                cliente_id=payload_data.cliente_id,
+                user_id=payload_data.user_id,
                 bucket_key=bucket_key,
                 filename=Path(nome_original).name,
                 filepath=filepath,
@@ -577,7 +577,7 @@ async def upload_document_desktop_massa(
 
     return UploadDesktopBatchOut(
         message="Upload em massa processado.",
-        cliente_id=payload_data.cliente_id,
+        user_id=payload_data.user_id,
         regra_id=payload_data.regra_id,
         total_recebidos=total_recebidos,
         total_processados=total_processados,
@@ -642,7 +642,7 @@ async def upload_document_desktop(
         hoje_str = datetime.utcnow().strftime("%Y-%m-%d")
         ext = Path(nome_original).suffix.lower()
         uuid12 = uuid4().hex[:12]
-        bucket_key = f"{meta_data.cliente_id}/{hoje_str}/{uuid12}{ext}"
+        bucket_key = f"{meta_data.user_id}/{hoje_str}/{uuid12}{ext}"
 
         storage.upload_bytes(
             content=content,
@@ -652,7 +652,7 @@ async def upload_document_desktop(
 
         documento = Documento(
             uuid=uuid12,
-            cliente_id=meta_data.cliente_id,
+            user_id=meta_data.user_id,
             bucket_key=bucket_key,
             filename=Path(nome_original).name,
             filepath=filepath,
@@ -741,7 +741,7 @@ def search_documents_desktop(
     query = (
         db.query(Documento)
         .options(joinedload(Documento.tags))
-        .filter(Documento.cliente_id == payload.cliente_id)
+        .filter(Documento.user_id == payload.user_id)
     )
 
     query = aplicar_filtros_documentos(query, payload)
@@ -758,7 +758,7 @@ def search_documents_desktop(
             DocumentoDesktopSearchOutItem(
                 id=doc.id,
                 uuid=doc.uuid,
-                cliente_id=doc.cliente_id,
+                user_id=doc.user_id,
                 filename=doc.filename,
                 filepath=doc.filepath,
                 bucket_key=doc.bucket_key,
@@ -780,7 +780,7 @@ def download_massa_desktop(
     query = (
         db.query(Documento)
         .options(joinedload(Documento.tags))
-        .filter(Documento.cliente_id == payload.cliente_id)
+        .filter(Documento.user_id == payload.user_id)
     )
 
     query = aplicar_filtros_documentos(query, payload)
@@ -838,7 +838,7 @@ def download_massa_desktop(
 
                 zf.writestr(arcname, content)
 
-        nome_zip = f"cliente_{payload.cliente_id}_download_massa.zip"
+        nome_zip = f"user_{payload.user_id}_download_massa.zip"
 
         return FileResponse(
             path=zip_path,
