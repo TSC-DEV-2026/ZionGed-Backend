@@ -38,7 +38,7 @@ class RegraDocumentoCampoOut(RegraDocumentoCampoBase):
 
 
 class RegraDocumentoBase(BaseModel):
-    cliente_id: int
+    user_id: int
     nome: str = Field(..., min_length=1, max_length=255)
     descricao: Optional[str] = None
     ativo: bool = True
@@ -49,7 +49,7 @@ class RegraDocumentoCreate(RegraDocumentoBase):
 
 
 class RegraDocumentoUpdate(BaseModel):
-    cliente_id: Optional[int] = None
+    user_id: Optional[int] = None
     nome: Optional[str] = Field(default=None, min_length=1, max_length=255)
     descricao: Optional[str] = None
     ativo: Optional[bool] = None

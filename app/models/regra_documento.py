@@ -19,7 +19,7 @@ class RegraDocumento(Base):
     __tablename__ = "tb_regra_documento"
 
     id = Column(BigInteger, primary_key=True, index=True)
-    cliente_id = Column(BigInteger, nullable=False, index=True)
+    user_id = Column(BigInteger, nullable=False, index=True)
     nome = Column(String(255), nullable=False)
     descricao = Column(Text, nullable=True)
     ativo = Column(Boolean, nullable=False, default=True)

@@ -18,7 +18,7 @@ router = APIRouter(prefix="/regras", tags=["Regras"])
 @router.post("/", response_model=RegraDocumentoDetalheOut, status_code=status.HTTP_201_CREATED)
 def create_regra(payload: RegraDocumentoCreate, db: Session = Depends(get_db)) -> Any:
     regra = RegraDocumento(
-        cliente_id=payload.cliente_id,
+        user_id=payload.user_id,
         nome=payload.nome,
         descricao=payload.descricao,
         ativo=payload.ativo,
@@ -54,13 +54,13 @@ def create_regra(payload: RegraDocumentoCreate, db: Session = Depends(get_db)) -
 
 @router.get("/", response_model=List[RegraDocumentoOut])
 def list_regras(
-    cliente_id: Optional[int] = Query(default=None),
+    user_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     query = db.query(RegraDocumento)
 
-    if cliente_id is not None:
-        query = query.filter(RegraDocumento.cliente_id == cliente_id)
+    if user_id is not None:
+        query = query.filter(RegraDocumento.user_id == user_id)
 
     return query.order_by(RegraDocumento.id.desc()).all()
 
@@ -98,7 +98,7 @@ def update_regra(
 
     data = payload.model_dump(exclude_unset=True)
 
-    for field in ["cliente_id", "nome", "descricao", "ativo"]:
+    for field in ["user_id", "nome", "descricao", "ativo"]:
         if field in data:
             setattr(regra, field, data[field])
 

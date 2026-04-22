@@ -176,8 +176,8 @@ def validar_obrigatorios(regra_campos: List[dict], tags_final: Dict[str, str]) -
     return faltantes
 
 
-def mover_para_falha(caminho_origem: str, cliente_id: int) -> str:
-    pasta_falha = os.path.join("storage", "falha_processar", f"cliente_{cliente_id}")
+def mover_para_falha(caminho_origem: str, user_id: int) -> str:
+    pasta_falha = os.path.join("storage", "falha_processar", f"user_{user_id}")
     os.makedirs(pasta_falha, exist_ok=True)
 
     destino = os.path.join(pasta_falha, os.path.basename(caminho_origem))
