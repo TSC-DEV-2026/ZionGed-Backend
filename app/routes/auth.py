@@ -40,10 +40,11 @@ def normalizar_cpf(cpf: str | None) -> str | None:
 
 
 def gerar_login_token(db: Session) -> str:
+    # 26 chars base62 ~= 155 bits de entropia
     chars = string.ascii_letters + string.digits
 
     while True:
-        token = "".join(secrets.choice(chars) for _ in range(20))
+        token = "".join(secrets.choice(chars) for _ in range(26))
         existe = db.scalar(select(Pessoa.id).where(Pessoa.login_token == token))
         if not existe:
             return token
