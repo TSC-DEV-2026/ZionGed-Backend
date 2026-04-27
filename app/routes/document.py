@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from app.dependencies.auth import get_current_user
 from app.models.auth import Usuario
-from app.models.regra_documento import RegraDocumento
+from app.models.regra_documento import RegraDocumento, RegraDocumentoCampo
 from app.database.connection import get_db
 from app.models.document import Documento, Tag, DocumentoConteudo
 from app.schemas.document import (
@@ -511,24 +511,16 @@ def list_user_tags(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    TagUser = aliased(Tag)
-
     rows = (
-        db.query(Tag.chave)
-        .join(Documento, Documento.id == Tag.documento_id)
-        .join(
-            TagUser,
-            (TagUser.documento_id == Documento.id)
-            & (TagUser.chave.in_([USER_TAG_KEY, USER_TAG_KEY_LEGACY])),
-        )
-        .filter(TagUser.valor == str(current_user.pessoa_id))
-        .filter(Tag.chave.notin_([USER_TAG_KEY, USER_TAG_KEY_LEGACY]))
+        db.query(RegraDocumentoCampo.nome_campo)
+        .join(RegraDocumento, RegraDocumento.id == RegraDocumentoCampo.regra_id)
+        .filter(RegraDocumento.user_id == current_user.pessoa_id)
         .distinct()
-        .order_by(Tag.chave.asc())
+        .order_by(RegraDocumentoCampo.nome_campo.asc())
         .all()
     )
 
-    return [row[0] for row in rows]
+    return [row[0] for row in rows if row and row[0]]
 
 @router.put(
     "/{uuid}/update",
